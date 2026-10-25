@@ -1,1 +1,159 @@
+# Software Marketplace - QA environment
+#
+#   docker compose up -d
+#
+# No setup file needed: every value has a QA default. To change something,
+# copy .env.example to .env and edit it.
+#
+# Everything runs from pre-built images. No Java, Maven or source code needed.
+# Credentials in this stack are for QA only. Never reuse them anywhere real.
 
+name: software-marketplace-qa
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: marketplace_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: marketplace_db
+      POSTGRES_USER: marketplace_user
+      POSTGRES_PASSWORD: marketplace_pass
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marketplace_user -d marketplace_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    # CHANGE THIS ONCE: put your Docker Hub username in place of YOUR_DOCKERHUB_USER
+    image: ${APP_IMAGE:-YOUR_DOCKERHUB_USER/software-marketplace-backend:qa}
+    container_name: marketplace_app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${APP_PORT:-8080}:8080"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: marketplace_db
+
+      # QA-only signing key (base64). Anyone can read it, so it must never be used outside QA.
+      JWT_SECRET: ${JWT_SECRET:-hfD9xQOkAR7w3SK7t1SqtAHQ5jNv4n6rx2IWhTIzN4502kn8RbWBYiaMhOGwcZyE}
+
+      # File storage (S3). Defaults point at the bundled MinIO below.
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY:-${MINIO_ROOT_USER:-qaminio}}
+      AWS_SECRET_KEY: ${AWS_SECRET_KEY:-${MINIO_ROOT_PASSWORD:-qaminio-secret-123}}
+      AWS_S3_ENDPOINT: ${AWS_S3_ENDPOINT:-http://minio:9000}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-marketplace}
+
+      # Emails are caught by Mailpit: open http://localhost:8025
+      MAIL_HOST: mailpit
+      MAIL_PORT: "1025"
+      MAIL_USERNAME: qa
+      MAIL_PASSWORD: qa
+      MAIL_FROM: no-reply@marketplace.local
+
+      # Virus scanning (needs the "scan" profile)
+      VIRUS_SCAN_ENABLED: ${VIRUS_SCAN_ENABLED:-false}
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
+
+      ESCROW_HOLD_DAYS: ${ESCROW_HOLD_DAYS:-14}
+      PAYOUT_MINIMUM_AMOUNT: ${PAYOUT_MINIMUM_AMOUNT:-20.00}
+
+      LOGGING_LEVEL_COM_MARKETPLACE: INFO
+      LOGGING_LEVEL_ORG_HIBERNATE_SQL: INFO
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/v3/api-docs || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 45s
+
+  # One-off: creates the QA admin (public registration refuses ADMIN).
+  # Login: qa.admin@example.com / Passw0rd!QA   ("$$" is how compose writes a literal "$")
+  seed-admin:
+    image: postgres:16-alpine
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: marketplace_pass
+    command:
+      - psql
+      - -h
+      - postgres
+      - -U
+      - marketplace_user
+      - -d
+      - marketplace_db
+      - -v
+      - ON_ERROR_STOP=1
+      - -c
+      - "INSERT INTO users (email, password_hash, full_name, role, status) VALUES ('qa.admin@example.com', '$$2b$$10$$XP3SsVYuRYe/L0WxKh6YF./d8Ud23u63YSmU3fpL2Oh2lIGPASsKe', 'QA Admin', 'ADMIN', 'ACTIVE') ON CONFLICT (email) DO NOTHING;"
+    restart: "no"
+
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${MAILPIT_UI_PORT:-8025}:8025"
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-qaminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-qaminio-secret-123}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:9000:9000"
+      - "${BIND_ADDR:-127.0.0.1}:9001:9001"
+    volumes:
+      - minio_data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-qaminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-qaminio-secret-123}
+      BUCKET: ${AWS_S3_BUCKET:-marketplace}
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do
+        echo 'waiting for minio...'; sleep 2;
+      done;
+      mc mb --ignore-existing local/$$BUCKET && echo 'bucket ready';
+      "
+    restart: "no"
+
+  clamav:
+    image: clamav/clamav:stable
+    profiles: ["scan"]
+    restart: unless-stopped
+    environment:
+      CLAMD_CONF_StreamMaxLength: 100M
+      CLAMD_CONF_MaxFileSize: 100M
+      CLAMD_CONF_MaxScanSize: 100M
+      CLAMD_CONF_AlertExceedsMax: "yes"
+    volumes:
+      - clamav_data:/var/lib/clamav
+
+volumes:
+  pg_data:
+  minio_data:
+  clamav_data:
