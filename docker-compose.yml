@@ -32,7 +32,7 @@ services:
 
   app:
     # CHANGE THIS ONCE: put your Docker Hub username in place of YOUR_DOCKERHUB_USER
-    image: ${APP_IMAGE:-YOUR_DOCKERHUB_USER/software-marketplace-backend:qa}
+    image: ${APP_IMAGE:-navindu2001/software-marketplace-backend:qa}
     container_name: marketplace_app
     restart: unless-stopped
     depends_on:
