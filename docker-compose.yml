@@ -6,17 +6,20 @@
 # copy .env.example to .env and edit it.
 #
 # Everything runs from pre-built images. No Java, Maven or source code needed.
+# The backend image is built and pushed to Docker Hub from the backend repo (see docs/MAINTAINERS.md).
 # Credentials in this stack are for QA only. Never reuse them anywhere real.
 
 name: software-marketplace-qa
 
 services:
 
+  # ------------------------------------------------------------------ database
   postgres:
     image: postgres:16-alpine
     container_name: marketplace_postgres
     restart: unless-stopped
     environment:
+      # The app reads these two from its own config, so they must stay as they are.
       POSTGRES_DB: marketplace_db
       POSTGRES_USER: marketplace_user
       POSTGRES_PASSWORD: marketplace_pass
@@ -30,8 +33,8 @@ services:
       timeout: 5s
       retries: 10
 
+  # --------------------------------------------------------------- backend API
   app:
-    # CHANGE THIS ONCE: put your Docker Hub username in place of YOUR_DOCKERHUB_USER
     image: ${APP_IMAGE:-navindu2001/software-marketplace-backend:qa}
     container_name: marketplace_app
     restart: unless-stopped
@@ -48,11 +51,12 @@ services:
       # QA-only signing key (base64). Anyone can read it, so it must never be used outside QA.
       JWT_SECRET: ${JWT_SECRET:-hfD9xQOkAR7w3SK7t1SqtAHQ5jNv4n6rx2IWhTIzN4502kn8RbWBYiaMhOGwcZyE}
 
-      # File storage (S3). Defaults point at the bundled MinIO below.
+      # File storage (S3). Defaults point at the bundled S3 mock below.
+      # The mock accepts any keys; they only have to be non-empty.
       AWS_REGION: ${AWS_REGION:-us-east-1}
-      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY:-${MINIO_ROOT_USER:-qaminio}}
-      AWS_SECRET_KEY: ${AWS_SECRET_KEY:-${MINIO_ROOT_PASSWORD:-qaminio-secret-123}}
-      AWS_S3_ENDPOINT: ${AWS_S3_ENDPOINT:-http://minio:9000}
+      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY:-qa-access-key}
+      AWS_SECRET_KEY: ${AWS_SECRET_KEY:-qa-secret-key}
+      AWS_S3_ENDPOINT: ${AWS_S3_ENDPOINT:-http://s3mock:9090}
       AWS_S3_BUCKET: ${AWS_S3_BUCKET:-marketplace}
 
       # Emails are caught by Mailpit: open http://localhost:8025
@@ -62,7 +66,7 @@ services:
       MAIL_PASSWORD: qa
       MAIL_FROM: no-reply@marketplace.local
 
-      # Virus scanning (needs the "scan" profile)
+      # Virus scanning (needs the "scan" profile, see README)
       VIRUS_SCAN_ENABLED: ${VIRUS_SCAN_ENABLED:-false}
       CLAMAV_HOST: clamav
       CLAMAV_PORT: "3310"
@@ -70,6 +74,7 @@ services:
       ESCROW_HOLD_DAYS: ${ESCROW_HOLD_DAYS:-14}
       PAYOUT_MINIMUM_AMOUNT: ${PAYOUT_MINIMUM_AMOUNT:-20.00}
 
+      # Quieter logs than the developer defaults
       LOGGING_LEVEL_COM_MARKETPLACE: INFO
       LOGGING_LEVEL_ORG_HIBERNATE_SQL: INFO
     healthcheck:
@@ -79,13 +84,14 @@ services:
       retries: 12
       start_period: 45s
 
-  # One-off: creates the QA admin (public registration refuses ADMIN).
-  # Login: qa.admin@example.com / Passw0rd!QA   ("$$" is how compose writes a literal "$")
+  # --------------------------------------------- one-off: create the QA admin
+  # Public registration refuses the ADMIN role, so the admin is inserted directly.
+  # Login: qa.admin@example.com / Passw0rd!QA   (the "$$" below is how compose writes a literal "$")
   seed-admin:
     image: postgres:16-alpine
     depends_on:
       app:
-        condition: service_healthy
+        condition: service_healthy   # the app has run the migrations by then
     environment:
       PGPASSWORD: marketplace_pass
     command:
@@ -102,6 +108,7 @@ services:
       - "INSERT INTO users (email, password_hash, full_name, role, status) VALUES ('qa.admin@example.com', '$$2b$$10$$XP3SsVYuRYe/L0WxKh6YF./d8Ud23u63YSmU3fpL2Oh2lIGPASsKe', 'QA Admin', 'ADMIN', 'ACTIVE') ON CONFLICT (email) DO NOTHING;"
     restart: "no"
 
+  # ------------------------------------------------------ catches all emails
   mailpit:
     image: axllent/mailpit:latest
     restart: unless-stopped
@@ -111,36 +118,20 @@ services:
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${MAILPIT_UI_PORT:-8025}:8025"
 
-  minio:
-    image: minio/minio:latest
+  # ------------------------------------------- file storage (S3 mock)
+  # MinIO is no longer available on Docker Hub, so QA uses Adobe's S3Mock.
+  # It creates the bucket by itself at start-up. It is a mock: it keeps files only while it
+  # runs and does not check signatures (see README, "Checking a file download by hand").
+  s3mock:
+    image: adobe/s3mock:latest
     restart: unless-stopped
-    command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-qaminio}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-qaminio-secret-123}
+      initialBuckets: ${AWS_S3_BUCKET:-marketplace}
+      COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS: ${AWS_S3_BUCKET:-marketplace}
     ports:
-      - "${BIND_ADDR:-127.0.0.1}:9000:9000"
-      - "${BIND_ADDR:-127.0.0.1}:9001:9001"
-    volumes:
-      - minio_data:/data
+      - "${BIND_ADDR:-127.0.0.1}:9090:9090"
 
-  minio-init:
-    image: minio/mc:latest
-    depends_on:
-      - minio
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-qaminio}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-qaminio-secret-123}
-      BUCKET: ${AWS_S3_BUCKET:-marketplace}
-    entrypoint: >
-      /bin/sh -c "
-      until mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do
-        echo 'waiting for minio...'; sleep 2;
-      done;
-      mc mb --ignore-existing local/$$BUCKET && echo 'bucket ready';
-      "
-    restart: "no"
-
+  # ------------------------------------ profile "scan": ClamAV virus scanner
   clamav:
     image: clamav/clamav:stable
     profiles: ["scan"]
@@ -155,5 +146,4 @@ services:
 
 volumes:
   pg_data:
-  minio_data:
   clamav_data:
