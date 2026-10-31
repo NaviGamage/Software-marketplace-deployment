@@ -30,7 +30,7 @@ The `seed-admin` container exits by itself after creating the admin account. Tha
 |---|---|---|
 | `app` | The marketplace backend (REST API) | `navindu2001/software-marketplace-backend:qa` |
 | `postgres` | Database (schema is created by the app on start) | `postgres:16-alpine` |
-| `minio` + `minio-init` | S3-compatible file storage for product files, with the bucket created automatically | `minio/minio`, `minio/mc` |
+| `s3mock` | S3-compatible file storage for product files (a mock; the bucket is created automatically) | `adobe/s3mock` |
 | `mailpit` | Catches every email the system sends so you can read it | `axllent/mailpit` |
 | `seed-admin` | Runs once: creates the QA admin account, then exits | `postgres:16-alpine` |
 | `clamav` | Virus scanner (**off by default**, see Optional) | `clamav/clamav` |
@@ -53,7 +53,7 @@ The `seed-admin` container exits by itself after creating the admin account. Tha
 | API | http://localhost:8080 |
 | API docs (Swagger UI) | http://localhost:8080/swagger-ui.html |
 | Emails sent by the system | http://localhost:8025 (Mailpit) |
-| File storage console (MinIO) | http://localhost:9001, user `qaminio`, password `qaminio-secret-123` |
+| File storage (S3 mock) | http://localhost:9090 (API only, no web page) |
 | Database | `localhost:5433`, db `marketplace_db`, user `marketplace_user`, password `marketplace_pass` |
 
 ## Test accounts
@@ -88,28 +88,30 @@ Reset to a clean database before each full test run: the collection creates its 
 Copy `.env.example` to `.env`, change what you need, then run `docker compose up -d` again.
 
 - **Virus scanning (ClamAV)**: set `COMPOSE_PROFILES=scan` and `VIRUS_SCAN_ENABLED=true`. Needs about 2 GB extra RAM; the first start downloads signatures and takes several minutes (`docker compose logs -f clamav`).
-- **Own S3 / Supabase bucket instead of MinIO**: set the `AWS_*` values. Use a bucket made for QA and get the keys from the developer. Never commit them.
+- **Own S3 / Supabase bucket instead of the bundled mock**: set the `AWS_*` values. Use a bucket made for QA and get the keys from the developer. Never commit them.
 - **Shared QA server**: set `BIND_ADDR=0.0.0.0` and use the server address as `baseUrl` in Postman.
 - **Pin a build**: set `APP_IMAGE` to a specific tag so the build cannot change during a test cycle.
 
 ## Checking a file download by hand
 
-The API returns a signed download link. With the bundled MinIO the link host is `minio`, which your computer does not know. Add this line once to your hosts file:
+The API returns a download link. With the bundled S3 mock the link host is `s3mock`, which your computer does not know. Add this line once to your hosts file:
 
 ```
-127.0.0.1 minio
+127.0.0.1 s3mock
 ```
 
-Windows: `C:\Windows\System32\drivers\etc\hosts` (edit as Administrator). Linux/macOS: `/etc/hosts`. The link then opens in a browser, and after it expires it must be refused.
+Windows: `C:\Windows\System32\drivers\etc\hosts` (edit as Administrator). Linux/macOS: `/etc/hosts`. The link then opens in a browser and downloads the zip.
+
+The mock **does not check signatures or expiry**, so it cannot prove that an expired link is refused, and files are lost when `s3mock` is stopped (use the reset command below to start clean). To test link expiry, point the stack at a real S3 or Supabase bucket (see Optional).
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | `pull access denied` for the backend image | The backend image `navindu2001/software-marketplace-backend:qa` is not published yet (or is private on Docker Hub). Ask the developer. |
-| `port is already allocated` | Another program uses 8080, 5433, 8025 or 9000. Change the port in `.env` or stop that program. |
+| `port is already allocated` | Another program uses 8080, 5433, 8025 or 9090. Change the port in `.env` or stop that program. |
 | `app` stays `starting` or becomes `unhealthy` | `docker compose logs app`. Send the last 50 lines to the developer. |
-| Upload requests return 500 | File storage is unreachable. Check `docker compose ps` shows `minio` running. |
+| Upload requests return 500 | File storage is unreachable. Check `docker compose ps` shows `s3mock` running. |
 | Many `429 Too Many Requests` | Use the 800 ms delay in the Postman Runner; after a login burst wait a minute. |
 | Apple Silicon (ARM) Mac, the image fails to start | Tell the developer; the image may need an ARM build. |
 
